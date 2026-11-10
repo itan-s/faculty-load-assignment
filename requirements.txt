@@ -1,0 +1,6 @@
+ollama
+pandas
+openpyxl
+pymupdf
+pydantic
+pyyaml

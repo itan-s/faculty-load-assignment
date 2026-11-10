@@ -1,0 +1,16 @@
+# Virtual environment - never commit
+.venv/
+
+# Python junk files
+__pycache__/
+*.pyc
+
+# Real data - keep sensitive faculty info out of Git!
+data/raw/*
+data/processed/*
+
+# Mac system files
+.DS_Store
+
+# VS Code settings
+.vscode/
