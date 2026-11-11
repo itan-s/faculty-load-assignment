@@ -1,0 +1,8 @@
+[theme]
+base="light"
+primaryColor="#00338D"        # deep Marian blue
+backgroundColor="#FFFFFF"
+secondaryBackgroundColor="#F8F9FF"  # light blue-tinted background
+textColor="#000000"            # black text
+font="sans"
+
