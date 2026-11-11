@@ -1,6 +1,7 @@
 import ollama
 
-MODEL = "qwen3:latest"  # change here if you use a different model
+#MODEL = "qwen3:latest"  # change here if you use a different model
+MODEL = "llama3.2:1b"
 
 def ask_llm(system_prompt: str, user_prompt: str, json_mode: bool = False) -> str:
     """Send a message to the local model and return its reply as text."""
