@@ -22,28 +22,41 @@ print("Created data/raw/faculty.xlsx")
 
 # ---------- 2. Course sections ----------
 courses = pd.DataFrame([
-    # Code, Section, Title, Credits, Days, Start, End, Evening
-    ["CS101", "01", "Intro to Programming",   3, "MW",  "09:00", "10:15", "No"],
-    ["CS101", "02", "Intro to Programming",   3, "TTh", "09:00", "10:15", "No"],
-    ["CS101", "03", "Intro to Programming",   3, "MW",  "18:00", "19:15", "Yes"],
-    ["CS101", "04", "Intro to Programming",   3, "TTh", "13:00", "14:15", "No"],
-    ["CS201", "01", "Data Structures",        3, "MW",  "10:30", "11:45", "No"],
-    ["CS201", "02", "Data Structures",        3, "TTh", "10:30", "11:45", "No"],
-    ["CS210", "01", "Computer Organization",  3, "MW",  "13:00", "14:15", "No"],
-    ["CS210", "02", "Computer Organization",  3, "TTh", "18:00", "19:15", "Yes"],
-    ["CS301", "01", "Algorithms",             3, "MW",  "09:00", "10:15", "No"],
-    ["CS301", "02", "Algorithms",             3, "TTh", "13:00", "14:15", "No"],
-    ["CS310", "01", "Databases",              3, "MW",  "14:30", "15:45", "No"],
-    ["CS350", "01", "Software Engineering",   3, "TTh", "09:00", "10:15", "No"],
-    ["CS401", "01", "Operating Systems",      3, "MW",  "10:30", "11:45", "No"],
-    ["CS410", "01", "Machine Learning",       3, "TTh", "14:30", "15:45", "No"],
-    ["CS410", "02", "Machine Learning",       3, "MW",  "18:00", "19:15", "Yes"],
-], columns=["CourseCode", "Section", "Title", "Credits",
-            "Days", "StartTime", "EndTime", "Evening"])
+    # Code, Sec, Title, Credits, Days, Start, End, Evening, Enrollment, AllowedRooms, Room
+    ["CS101", "01", "Intro to Programming",  3, "MW",  "09:00", "10:15", "No",  35, "",             ""],
+    ["CS101", "02", "Intro to Programming",  3, "TTh", "09:00", "10:15", "No",  35, "",             ""],
+    ["CS101", "03", "Intro to Programming",  3, "MW",  "18:00", "19:15", "Yes", 30, "",             ""],
+    ["CS101", "04", "Intro to Programming",  3, "TTh", "13:00", "14:15", "No",  38, "",             ""],
+    ["CS201", "01", "Data Structures",       3, "MW",  "10:30", "11:45", "No",  30, "",             ""],
+    ["CS201", "02", "Data Structures",       3, "TTh", "10:30", "11:45", "No",  28, "",             ""],
+    ["CS210", "01", "Computer Organization", 3, "MW",  "13:00", "14:15", "No",  22, "LAB-01,LAB-02", ""],
+    ["CS210", "02", "Computer Organization", 3, "TTh", "18:00", "19:15", "Yes", 20, "LAB-01,LAB-02", ""],
+    ["CS301", "01", "Algorithms",            3, "MW",  "09:00", "10:15", "No",  25, "",             ""],
+    ["CS301", "02", "Algorithms",            3, "TTh", "13:00", "14:15", "No",  25, "",             ""],
+    ["CS310", "01", "Databases",             3, "MW",  "14:30", "15:45", "No",  24, "LAB-01,LAB-02", "LAB-02"],
+    ["CS350", "01", "Software Engineering",  3, "TTh", "09:00", "10:15", "No",  26, "",             ""],
+    ["CS401", "01", "Operating Systems",     3, "MW",  "10:30", "11:45", "No",  18, "",             ""],
+    ["CS410", "01", "Machine Learning",      3, "TTh", "14:30", "15:45", "No",  20, "",             ""],
+    ["CS410", "02", "Machine Learning",      3, "MW",  "18:00", "19:15", "Yes", 15, "",             ""],
+], columns=["CourseCode", "Section", "Title", "Credits", "Days", "StartTime",
+            "EndTime", "Evening", "Enrollment", "AllowedRooms", "Room"])
 courses.to_excel("data/raw/courses.xlsx", index=False)
 print("Created data/raw/courses.xlsx")
 
-# ---------- 3. Policy PDF ----------
+# ---------- 3. Classrooms details  ----------
+rooms = pd.DataFrame([
+    ["RM-101", "Main",  40, "Yes", "", "Lecture"],
+    ["RM-102", "Main",  40, "Yes", "", "Lecture"],
+    ["RM-201", "Main",  30, "Yes", "MW 07:00-17:00; TTh 07:00-17:00", "Lecture"],
+    ["RM-202", "Main",  26, "Yes", "", "Lecture"],
+    ["LAB-01", "Annex", 25, "Yes", "MW 08:00-21:00; TTh 08:00-21:00", "Laboratory"],
+    ["LAB-02", "Annex", 24, "Yes", "MW 08:00-17:00; TTh 08:00-17:00", "Laboratory"],
+    ["RM-301", "Annex", 50, "No",  "", "Lecture"],
+], columns=["RoomID", "Building", "Capacity", "Available", "Availability", "RoomType"])
+rooms.to_excel("data/raw/rooms.xlsx", index=False)
+print("Created data/raw/rooms.xlsx")
+
+# ---------- 4. Policy PDF ----------
 policy_text = """DEPARTMENT TEACHING WORKLOAD POLICY
 
 1. Standard Teaching Load

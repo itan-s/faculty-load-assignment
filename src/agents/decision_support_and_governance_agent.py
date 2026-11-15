@@ -14,7 +14,8 @@ REPORT_TEMPLATE = """Write a teaching assignment review report with these sectio
 1. Overall Summary (2-3 sentences: is this plan ready, or does it need work?)
 2. Compliance Issues (list each violation plainly; if none, say so)
 3. Workload Fairness (comment on load gaps and evening distribution)
-4. Recommendations (2-3 concrete next actions for the Chair)
+4. Room Assignment Issues (summarize room-related problems based ONLY on the room summary)
+5. Recommendations (2-3 concrete next actions for the Chair)
 
 VIOLATIONS FOUND BY VALIDATOR:
 {violations}
@@ -24,7 +25,30 @@ PER-FACULTY METRICS:
 
 DEPARTMENT SUMMARY METRICS:
 {summary}
+
+ROOM-ASSIGNMENT SUMMARY (pre-computed by code; do NOT contradict this):
+{room_summary}
 """
+
+
+def summarize_room_violations(violations: list[str]) -> str:
+    """Extract and summarize all room-related violations."""
+    room_prefixes = (
+        "NO ROOM",
+        "ROOM NOT ALLOWED",
+        "ROOM OVER CAPACITY",
+        "ROOM CONFLICT",
+        "ROOM UNAVAILABLE",
+    )
+    room_violations = [v for v in violations if v.startswith(room_prefixes)]
+    if not room_violations:
+        return "No room-assignment issues were detected in the current plan."
+
+    lines = ["Room-assignment issues detected:"]
+    for v in room_violations:
+        lines.append(f"- {v}")
+    return "\n".join(lines)
+
 
 def build_assignment_table(assignments, faculty_by_id, sections_by_id):
     """Return a list of rows for the final Excel table."""
@@ -49,7 +73,9 @@ def build_assignment_table(assignments, faculty_by_id, sections_by_id):
             "StartTime": sec["start_time"],
             "EndTime": sec["end_time"],
             "Evening": sec["evening"],
+            "Room": a.get("room", ""),        
         })
+
     return rows
 
 
@@ -127,6 +153,7 @@ def run_governance_agent(plan_path: str = "data/processed/plan_draft_v1.json"):
 
     # 1) Metrics for fairness/compliance
     metrics = compute_metrics(plan["assignments"], faculty_by_id, sections_by_id)
+    room_summary_text = summarize_room_violations(plan["violations"])
 
     print("Per-faculty summary (computed by code):")
     print(f"{'Name':<12} {'Req':>4} {'Got':>4} {'Gap':>5} {'Preps':>5} {'Eve':>4}")
@@ -135,6 +162,7 @@ def run_governance_agent(plan_path: str = "data/processed/plan_draft_v1.json"):
               f"{p['load_gap']:>5} {p['preps']:>5} {p['evening_sections']:>4}")
     print(f"\nFairness: load gap std dev = {metrics['summary']['load_gap_std_dev']}")
     print(f"Violations in plan: {len(plan['violations'])}")
+    print("\n" + room_summary_text + "\n")
 
     # 2) Narrative report via LLM (unchanged)
     print("\nAsking LLM to write the Chair's report...")
@@ -144,6 +172,7 @@ def run_governance_agent(plan_path: str = "data/processed/plan_draft_v1.json"):
             violations=json.dumps(plan["violations"], indent=2),
             per_faculty=json.dumps(metrics["per_faculty"], indent=2),
             summary=json.dumps(metrics["summary"], indent=2),
+            room_summary=room_summary_text,
         ),
     )
 

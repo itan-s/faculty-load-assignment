@@ -9,6 +9,10 @@ class Section(BaseModel):
     start_time: str
     end_time: str
     evening: bool
+    enrollment: int = 0
+    allowed_rooms: list[str] = []     # empty = any room
+    room: str | None = None           # pre-assigned room, if any
+
 
     @property
     def section_id(self) -> str:

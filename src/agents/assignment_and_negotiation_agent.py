@@ -1,8 +1,9 @@
 import json
-from src.ingestion.excel_loader import load_faculty, load_sections
+from src.ingestion.excel_loader import load_faculty, load_sections, load_rooms
 from src.llm.client import ask_llm
 from src.validation.validators import validate_plan
-
+from src.solvers.ortools_solver import solve_assignments_with_ortools
+from src.solvers.room_solver import solve_room_assignments
 
 def extract_assignments(reply: str) -> list[dict] | None:
     """Pull the assignment list out of the LLM reply, tolerating
@@ -106,7 +107,53 @@ Produce a NEW full assignment list that fixes ALL violations.
 Return ONLY the JSON object with key "assignments" as before.
 """
 
-def run_assignment_agent(output_name: str = "draft_v1"):
+def generate_plan_with_llm(faculty, sections, constraints,
+                           faculty_by_id, sections_by_id):
+    """LLM engine: propose a plan, revise against validator feedback.
+    Returns (assignments, violations) — assignments may be None if all
+    attempts fail to produce parseable output."""
+    base_prompt = build_prompt(faculty, sections, constraints)
+
+    best_assignments = None
+    best_violations = None
+
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        print(f"\n--- LLM attempt {attempt}/{MAX_ATTEMPTS} ---")
+
+        if attempt == 1 or best_assignments is None:
+            prompt = base_prompt
+        else:
+            prompt = base_prompt + "\n\n" + build_revision_prompt(
+                best_assignments, best_violations)
+
+        reply = ask_llm(SYSTEM_PROMPT, prompt, json_mode=True)
+        assignments = extract_assignments(reply)
+
+        if assignments is None:
+            print("  ⚠️ Could not parse a usable plan. Raw reply (first 400 chars):")
+            print("  " + reply[:400].replace("\n", "\n  "))
+            continue
+
+        violations = validate_plan(assignments, faculty_by_id,
+                                   sections_by_id, constraints)
+        print(f"  {len(assignments)} assignments, {len(violations)} violation(s)")
+
+        if best_violations is None or len(violations) < len(best_violations):
+            best_assignments = assignments
+            best_violations = violations
+
+        if not violations:
+            print("  ✅ Found a violation-free plan.")
+            break
+
+    return best_assignments, best_violations
+
+
+def run_assignment_agent(engine: str = "solver", output_name: str = "draft_v1"):
+    """Generate an assignment plan using the chosen engine:
+       - "solver": OR-Tools CP-SAT (deterministic, respects all hard constraints)
+       - "llm":    LLM proposal with validator-driven revision loop
+    Validation and output format are identical for both engines."""
     faculty = load_faculty()
     sections = load_sections()
     with open("data/processed/constraints.json") as f:
@@ -117,57 +164,62 @@ def run_assignment_agent(output_name: str = "draft_v1"):
     sections_by_id = {s.section_id: s.model_dump() | {"section_id": s.section_id}
                       for s in sections}
 
-    base_prompt = build_prompt(faculty, sections, constraints)
+    # Engine selection
+    if engine == "solver":
+        print("\n[Assignment Agent] Engine: OR-Tools solver")
+        assignments = solve_assignments_with_ortools()
+        violations = validate_plan(assignments, faculty_by_id,
+                                   sections_by_id, constraints)
+    else:
+        print("\n[Assignment Agent] Engine: LLM with revision loop")
+        assignments, violations = generate_plan_with_llm(
+            faculty, sections, constraints, faculty_by_id, sections_by_id)
 
-    best_assignments = None
-    best_violations = None
+    # Guard: engine produced nothing usable
+    if not assignments:
+        print("\n❌ No usable plan produced "
+              f"({'solver found no feasible solution' if engine == 'solver' else 'all LLM attempts failed'}).")
+        output_path = f"data/processed/plan_{output_name}.json"
+        with open(output_path, "w") as f:
+            json.dump({"assignments": [], "violations": ["NO PLAN: engine produced no assignments"],
+                       "engine": engine}, f, indent=2)
+        return {"assignments": [], "violations": [], "engine": engine}
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        print(f"\n--- Attempt {attempt}/{MAX_ATTEMPTS} ---")
+        # --- Stage 2: optional room assignment ---
+    rooms_by_id = None
+    if assignments:
+        try:
+            rooms = load_rooms()
+            room_map = solve_room_assignments(sections, rooms)
+            for a in assignments:
+                a["room"] = room_map.get(a["section_id"])
+            rooms_by_id = {r.room_id: r.model_dump() for r in rooms}
+            n_roomed = sum(1 for a in assignments if a.get("room"))
+            print(f"[Assignment Agent] Rooms assigned: {n_roomed}/{len(assignments)}")
+        except FileNotFoundError:
+            print("[Assignment Agent] No rooms.xlsx found; skipping room assignment.")
 
-        if attempt == 1 or best_assignments is None:
-            # First attempt: use only the base prompt
-            prompt = base_prompt
-        else:
-            # Later attempts: show previous assignments and violations
-            prompt = base_prompt + "\n\n" + build_revision_prompt(
-                best_assignments, best_violations
-            )
+    # Validation (now room-aware when rooms exist)
+    violations = validate_plan(assignments, faculty_by_id, sections_by_id,
+                               constraints, rooms_by_id=rooms_by_id)
 
-        reply = ask_llm(SYSTEM_PROMPT, prompt, json_mode=True)
-        assignments = extract_assignments(reply)
 
-        if assignments is None:
-            print("  ⚠️ Could not parse a usable plan. Raw reply (first 400 chars):")
-            print("  " + reply[:400].replace("\n", "\n  "))
-            continue
-
-        violations = validate_plan(assignments, faculty_by_id, sections_by_id, constraints)
-        print(f"  {len(assignments)} assignments, {len(violations)} violation(s)")
-
-        # Track the best plan so far
-        if best_violations is None or len(violations) < len(best_violations):
-            best_assignments = assignments
-            best_violations = violations
-
-        if not violations:
-            print("  ✅ Found a violation-free plan.")
-            break
-
-    # Report final/best plan
+    # Shared reporting and save
     print("\n" + "=" * 50)
-    print(f"BEST PLAN FOUND: {len(best_violations)} violation(s)")
-    for a in best_assignments:
+    print(f"PLAN ({engine}): {len(assignments)} assignments, "
+          f"{len(violations)} violation(s)")
+    for a in assignments:
         name = faculty_by_id.get(a["faculty_id"], {}).get("name", "???")
         print(f"  {a['section_id']:<10} -> {name}")
-    for v in best_violations:
+    for v in violations:
         print(f"  ❌ {v}")
 
     output_path = f"data/processed/plan_{output_name}.json"
     with open(output_path, "w") as f:
-        json.dump({"assignments": best_assignments, "violations": best_violations},
-                  f, indent=2)
+        json.dump({"assignments": assignments, "violations": violations,
+                   "engine": engine}, f, indent=2)
     print(f"\nSaved {output_path}")
+    return {"assignments": assignments, "violations": violations, "engine": engine}
     
 
 if __name__ == "__main__":

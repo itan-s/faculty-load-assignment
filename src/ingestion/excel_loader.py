@@ -1,6 +1,8 @@
 import pandas as pd
 from src.models.faculty import FacultyProfile
 from src.models.course import Section
+from src.models.room import Room 
+from src.solvers.room_solver import parse_availability
 
 # CLIENT-CONFIG: map Excel columns -> preference keys.
 # To support a new preference: add one line here + one checker in supervisor_agent.py
@@ -41,6 +43,27 @@ def load_sections(path: str = "data/raw/courses.xlsx") -> list[Section]:
             start_time=str(row["StartTime"]),
             end_time=str(row["EndTime"]),
             evening=str(row["Evening"]).strip().lower() == "yes",
+            enrollment=int(row.get("Enrollment", 0) or 0),
+            allowed_rooms=[r.strip() for r in str(row["AllowedRooms"]).split(",")]
+                          if pd.notna(row.get("AllowedRooms")) and str(row.get("AllowedRooms")).strip()
+                          else [],
+            room=str(row["Room"]).strip()
+                 if pd.notna(row.get("Room")) and str(row.get("Room")).strip()
+                 else None,
+        )
+        for _, row in df.iterrows()
+    ]
+
+def load_rooms(path: str = "data/raw/rooms.xlsx") -> list[Room]:
+    df = pd.read_excel(path)
+    return [
+        Room(
+            room_id=str(row["RoomID"]).strip(),
+            building=str(row.get("Building", "")),
+            capacity=int(row.get("Capacity", 0) or 0),
+            available=str(row.get("Available", "Yes")).strip().lower() == "yes",
+            availability=parse_availability(row.get("Availability", "")),
+            room_type=str(row.get("RoomType", "Lecture")).strip(),
         )
         for _, row in df.iterrows()
     ]

@@ -135,10 +135,17 @@ VIOLATION_POLICY_MAP = {
     "UNQUALIFIED": "Course Qualifications Policy",
     "EVENING CONSENT": "Evening Classes Policy",
     "OVERLOAD": "Teaching Load Policy",
+    "UNDERLOAD": "Teaching Load Policy",
     "TOO MANY PREPS": "Course Preparations Policy",
     "TOO MANY EVENINGS": "Evening Classes Policy",
     "TIME CONFLICT": "Scheduling / Time Conflict Policy",
+    "NO ROOM": "Room Assignment Policy",
+    "ROOM NOT ALLOWED": "Room Assignment Policy",
+    "ROOM OVER CAPACITY": "Room Assignment Policy",
+    "ROOM CONFLICT": "Room Assignment Policy",
+    "ROOM UNAVAILABLE": "Room Assignment Policy",   # if added availability windows
 }
+
 
 # CLIENT-CONFIG: fixed descriptions for constraint keys
 CONSTRAINT_DESCRIPTIONS = {
@@ -262,7 +269,7 @@ def build_improvement_options(plan, faculty_by_id, sections_by_id, metrics):
     for v in plan.get("violations", []):
         prefix = v.split(":", 1)[0].strip()
 
-        # --- Section needs a (different) instructor ---
+        # Section needs a (different) instructor
         if prefix in ("UNASSIGNED", "UNQUALIFIED", "EVENING CONSENT"):
             # Find the section id mentioned in the violation text
             sid = next((tok.strip("().,")
@@ -281,7 +288,7 @@ def build_improvement_options(plan, faculty_by_id, sections_by_id, metrics):
                     candidates if candidates else ["NONE under current rules"],
             })
 
-        # --- Faculty is overloaded: which sections could move away? ---
+        # Faculty is overloaded: which sections could move away? 
         elif prefix == "OVERLOAD":
             fid = next((i for i, f in faculty_by_id.items() if f["name"] in v), None)
             if not fid:
@@ -306,7 +313,41 @@ def build_improvement_options(plan, faculty_by_id, sections_by_id, metrics):
                     movable if movable else ["NONE under current rules"],
             })
 
-        # --- Other violation types: report, no computed options yet ---
+        # Faculty below policy minimum: can they take an unassigned section? 
+        elif prefix == "UNDERLOAD":
+            fid = next((i for i, f in faculty_by_id.items() if f["name"] in v), None)
+            if not fid:
+                options.append({"violation": v,
+                                "note": "Could not identify the faculty."})
+                continue
+
+            assigned_sids = {a["section_id"] for a in plan["assignments"]}
+            unassigned = [sid for sid in sections_by_id if sid not in assigned_sids]
+
+            takeable = []
+            for sid in unassigned:
+                sec = sections_by_id[sid]
+                if (sec["course_code"] in faculty_by_id[fid]["qualified_courses"]
+                        and spare_capacity(fid) >= sec["credits"]
+                        and (not sec["evening"] or accepts_evening(fid))):
+                    takeable.append(sid)
+
+            if takeable:
+                options.append({
+                    "violation": v,
+                    "fixable": True,
+                    "unassigned_sections_this_faculty_could_take": takeable,
+                })
+            else:
+                options.append({
+                    "violation": v,
+                    "fixable": False,
+                    "note": ("All sections are already assigned (or none are legal "
+                             "for this faculty). This underload CANNOT be fixed by "
+                             "reassignment; it requires offering additional sections."),
+                })
+
+        # Other violation types: report, no computed options yet ---
         else:
             # CLIENT-CONFIG: add candidate logic for new violation types here
             options.append({"violation": v,
@@ -689,18 +730,30 @@ def handle_suggest_compliance_improvements(params: dict) -> dict:
     # CODE decides what is legally possible
     options = build_improvement_options(plan, faculty_by_id, sections_by_id, metrics)
 
-    # LLM only narrates the pre-computed options
-    facts = {
-        "violations_with_valid_options": options,
-        "summary_metrics": metrics["summary"],
-    }
-    suggestions = ask_llm(SUGGEST_IMPROVEMENTS_SYSTEM_PROMPT,
-                          json.dumps(facts, indent=2), json_mode=False)
+    # Split: LLM narrates only violations with real options;
+    # unfixable ones get a deterministic statement (no hallucination possible).
+    fixable = [o for o in options if o.get("fixable", True) and not o.get("note")]
+    unfixable = [o for o in options if o not in fixable]
 
+    parts = []
+    if fixable:
+        facts = {"violations_with_valid_options": fixable,
+                 "summary_metrics": metrics["summary"]}
+        parts.append(ask_llm(SUGGEST_IMPROVEMENTS_SYSTEM_PROMPT,
+                             json.dumps(facts, indent=2), json_mode=False))
+    if unfixable:
+        lines = ["**Not fixable by reassignment under current policies:**"]
+        for o in unfixable:
+            lines.append(f"- {o['violation']}")
+        lines.append("\nThese require structural changes (e.g., offering more "
+                     "sections), which are outside this system's authority.")
+        parts.append("\n".join(lines))
+
+    content = "\n\n".join(parts) if parts else "No violations to address."
     return {"type": "text",
             "title": "Suggested compliance improvements "
                      "(reassignments only, no policy changes)",
-            "content": suggestions}
+            "content": content}
 
 
 def handle_recalculate_plan(params: dict) -> dict:
