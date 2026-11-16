@@ -158,41 +158,58 @@ def generate_plan_with_llm(faculty, sections, constraints,
 
 def apply_negotiation_directives_to_loads(
     directives: list[dict], faculty
-) -> dict[str, float]:
-    """Return a dict faculty_id -> adjusted required_load (<= original),
-    based on negotiation directives. Policies are not changed; we only tighten."""
-    # Start from baseline
-    adjusted = {f.faculty_id: f.required_load for f in faculty}
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Return (adjusted_max_loads, target_min_loads) per faculty_id.
+
+    - adjusted_max_loads: caps for reduce_load directives (<= original required_load).
+    - target_min_loads: soft minimum targets for increase_load directives.
+    Policies are not changed; we only tighten maxima and provide hints for minima.
+    """
+    # Start from baseline caps
+    adjusted_max = {f.faculty_id: f.required_load for f in faculty}
+    target_min = {}  # only for faculty mentioned in increase_load
 
     for d in directives:
-        if d.get("type") != "reduce_load":
-            continue
-        target = d.get("target_max_load")
-        if target is None:
-            continue
-        try:
-            target = float(target)
-        except ValueError:
+        dtype = d.get("type")
+        if dtype not in ("reduce_load", "increase_load"):
             continue
 
-        # Find the matching faculty (simple name contains, first match)
-            # Accept either a faculty_id or a (partial) name, in either field
+        # Identify faculty by ID or (partial) name
         ident = str(d.get("faculty_id") or d.get("faculty_name") or "").strip().lower()
         if not ident:
             continue
-        match = next(
-            (f for f in faculty
-             if ident == f.faculty_id.lower() or ident in f.name.lower()),
-            None)
+        match = next((f for f in faculty
+                      if ident == f.faculty_id.lower() or ident in f.name.lower()), None)
         if not match:
             continue
-
         fid = match.faculty_id
-        # Tighten load: cannot exceed current required, cannot go below 0
-        new_load = min(adjusted[fid], max(0.0, target))
-        adjusted[fid] = new_load
 
-    return adjusted
+        if dtype == "reduce_load":
+            target = d.get("target_max_load")
+            if target is None:
+                continue
+            try:
+                target = float(target)
+            except ValueError:
+                continue
+            # Tighten cap: cannot exceed current required, cannot go below 0
+            new_cap = min(adjusted_max[fid], max(0.0, target))
+            adjusted_max[fid] = new_cap
+
+        elif dtype == "increase_load":
+            target = d.get("target_min_load")
+            if target is None:
+                continue
+            try:
+                target = float(target)
+            except ValueError:
+                continue
+            # Soft minimum target: record but don't override required_load
+            # (solver will try to move them toward this if possible)
+            target_min[fid] = max(0.0, target)
+
+    return adjusted_max, target_min
+
 
 
 def run_assignment_agent(engine: str = "solver", 
@@ -212,7 +229,7 @@ def run_assignment_agent(engine: str = "solver",
     with open("data/processed/constraints.json") as f:
         constraints = json.load(f)
 
-    adjusted_loads = apply_negotiation_directives_to_loads(directives or [], faculty)
+    adjusted_max_loads, target_min_loads = apply_negotiation_directives_to_loads(directives or [], faculty)
 
     faculty_by_id = {f.faculty_id: f.model_dump() | {"required_load": f.required_load}
                      for f in faculty}
@@ -222,8 +239,10 @@ def run_assignment_agent(engine: str = "solver",
     # Engine selection
     if engine == "solver":
         print("\n[Assignment Agent] Engine: OR-Tools solver")
-        assignments = solve_assignments_with_ortools(adjusted_loads=adjusted_loads,
-                                                     previous_assignments=previous_assignments)
+        assignments = solve_assignments_with_ortools(adjusted_loads=adjusted_max_loads,
+                                                     previous_assignments=previous_assignments,
+                                                     target_min_loads=target_min_loads,
+                                                     )
     else:
         print("\n[Assignment Agent] Engine: LLM with revision loop")
         assignments, violations = generate_plan_with_llm(
@@ -290,19 +309,37 @@ Translate the Chair's request into a JSON list of "directives".
 Supported directive types:
 
 1) "reduce_load":
-   {
-     "type": "reduce_load",
-     "faculty_name": "<name as stated>",
-     "target_max_load": <number>
-   }
+   - Meaning: try to reduce a faculty member's assigned load by adjusting
+     assignments, but WITHOUT changing any policy values.
+   - Fields:
+     {
+       "type": "reduce_load",
+       "faculty_name": "<name or ID as stated>",
+       "target_max_load": <number>
+     }
+
+2) "increase_load":
+   - Meaning: try to increase a faculty member's assigned load (while still
+     respecting their policy-based required load and all other constraints),
+     by reassigning sections where possible.
+   - Fields:
+     {
+       "type": "increase_load",
+       "faculty_name": "<name or ID as stated>",
+       "target_min_load": <number>
+     }
 
 EXAMPLE:
-Chair's request: "Reduce Dr. Chen's load to 6 credits."
+Chair's request: "Reduce Dr. Chen's load to 6 credits and increase Dr. Baker's load to 9 credits."
 Correct output:
-[{"type": "reduce_load", "faculty_name": "Dr. Chen", "target_max_load": 6}]
+[
+  {"type": "reduce_load", "faculty_name": "Dr. Chen", "target_max_load": 6},
+  {"type": "increase_load", "faculty_name": "Dr. Baker", "target_min_load": 9}
+]
 
 IMPORTANT:
-- "target_max_load" must be the NUMBER STATED IN THE CHAIR'S REQUEST.
+- For reduce_load, "target_max_load" must be the NUMBER STATED IN THE CHAIR'S REQUEST.
+- For increase_load, "target_min_load" must be the NUMBER STATED IN THE CHAIR'S REQUEST.
 - You may use "faculty_id" instead of "faculty_name" if an ID is given.
 - If no supported directive matches, return [].
 Return ONLY a JSON list, nothing else."""
@@ -350,7 +387,6 @@ Return the list of directives."""
 
 
 def _build_lookup_tables():
-    """Agent builds its own lookups; it must not import from the supervisor."""
     faculty = load_faculty()
     sections = load_sections()
     faculty_by_id = {f.faculty_id: f.model_dump() | {"required_load": f.required_load}
@@ -409,6 +445,7 @@ def propose_negotiated_plan(user_query: str) -> dict:
        "directives": [...], "diff": {...}, "narrative": str}
     """
     directives = extract_negotiation_directives(user_query)
+    print("\n[DEBUG negotiation] directives:", json.dumps(directives, indent=2), "\n")
     if not directives:
             return {"status": "no_directives"}
 
@@ -417,23 +454,51 @@ def propose_negotiated_plan(user_query: str) -> dict:
     with open(CURRENT_PLAN_PATH) as f:
         old_plan = json.load(f)
 
+    print("\n[DEBUG negotiation] Current loads:")
+
     # Sanity: does the directive actually bind against the CURRENT plan?
     _, _, faculty_by_id, sections_by_id = _build_lookup_tables()
     current_metrics = compute_metrics(old_plan["assignments"],
-                                          faculty_by_id, sections_by_id)
+                                      faculty_by_id, sections_by_id)
+
+    # DEBUG START
+    for fid, p in current_metrics["per_faculty"].items():
+        print(f"  {p['name']}: {p['assigned_credits']} assigned, required {p['required_load']}")
+    # DEBUG END
+    
+    
     for d in directives:
-        if d.get("type") != "reduce_load":
+        dtype = d.get("type")
+        if dtype not in ("reduce_load", "increase_load"):
             continue
         ident = str(d.get("faculty_id") or d.get("faculty_name") or "").lower()
         fid = next((i for i, f in faculty_by_id.items()
                     if ident == i.lower() or ident in f["name"].lower()), None)
-        if fid:
-            assigned_now = current_metrics["per_faculty"][fid]["assigned_credits"]
-            if assigned_now <= float(d.get("target_max_load", 0)):
+        if not fid:
+            continue
+        assigned_now = current_metrics["per_faculty"][fid]["assigned_credits"]
+        if dtype == "reduce_load":
+            try:
+                target = float(d.get("target_max_load", 0))
+            except ValueError:
+                continue
+            if assigned_now <= target:
                 return {"status": "already_satisfied",
                         "faculty": faculty_by_id[fid]["name"],
                         "assigned": assigned_now,
                         "target": d["target_max_load"]}
+        elif dtype == "increase_load":
+            try:
+                target = float(d.get("target_min_load", 0))
+            except ValueError:
+                continue
+            if assigned_now >= target:
+                return {"status": "already_satisfied",
+                        "faculty": faculty_by_id[fid]["name"],
+                        "assigned": assigned_now,
+                        "target": d["target_min_load"]}
+
+
 
     replaced_previous = negotiation_pending()
 

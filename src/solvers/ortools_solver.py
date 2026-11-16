@@ -10,6 +10,7 @@ def solve_assignments_with_ortools(
     constraints_path: str = "data/processed/constraints.json",
     adjusted_loads=None,
     previous_assignments=None,
+    target_min_loads=None,
 ) -> List[Dict[str, str]]:
     """Solve the assignment problem using OR-Tools CP-SAT.
 
@@ -31,6 +32,7 @@ def solve_assignments_with_ortools(
     max_evening_sections = constraints.get("max_evening_sections", 2)
     max_preps = constraints.get("max_preparations", 3)
     adjusted_loads = adjusted_loads or {}
+    target_min_loads = target_min_loads or {}
 
 
     faculty = load_faculty()
@@ -62,6 +64,10 @@ def solve_assignments_with_ortools(
         int(round((adjusted_loads.get(f.faculty_id, f.required_load)) * SCALE))
         for f in faculty
     ]
+    target_min = {
+        f.faculty_id: int(round(target_min_loads[f.faculty_id] * SCALE))
+        for f in faculty if f.faculty_id in target_min_loads
+    }
     course_codes = [s.course_code for s in sections]
     is_evening = [s.evening for s in sections]
     min_load = int(round(constraints.get("min_load_full_time", 0) * SCALE))
@@ -197,8 +203,26 @@ def solve_assignments_with_ortools(
             if fi is not None and si is not None:
                 prev_pairs.add((fi, si))
 
+    # Encourage reaching target_min_loads for increase_load directives
+    target_terms = []
+    for fi, f in enumerate(faculty):
+        fid = f.faculty_id
+        tmin = target_min.get(fid)
+        if tmin is None:
+            continue
+        assigned = sum(credits[si] * x[(fi, si)] for si in S)
+        # We can't encode max(0, assigned - tmin) directly here easily,
+        # but we can simply reward assigned units up to tmin.
+        # Create an IntVar for truncated assigned load: up to tmin
+        achv = model.NewIntVar(0, tmin, f"achv_min_f{fi}")
+        model.Add(achv <= assigned)
+        model.Add(achv <= tmin)
+        target_terms.append(achv)    
+
     STABILITY_WEIGHT = 200   # CLIENT-CONFIG: cost of moving one section
     stability_terms = [x[(fi, si)] for (fi, si) in prev_pairs]
+
+    TARGET_MIN_WEIGHT = 500   # CLIENT-CONFIG: importance of hitting target mins
 
     COVERAGE_WEIGHT = 10000   # coverage always comes first
     model.Maximize(
@@ -206,7 +230,8 @@ def solve_assignments_with_ortools(
         - 10 * max_gap                      # primary: help the worst-off
         - 50 * sum(teaches_nothing)         # secondary: nobody should have zero
         - 5 * sum(shortfalls)               # NEW: push everyone toward min load
-        + STABILITY_WEIGHT * sum(stability_terms) 
+        + STABILITY_WEIGHT * sum(stability_terms)
+        + TARGET_MIN_WEIGHT * sum(target_terms) 
     )
 
     # Solve
