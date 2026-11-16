@@ -3,8 +3,10 @@ Run with:  streamlit run app.py
 """
 import os
 import streamlit as st
-
-from src.agents.supervisor_agent import classify_intent, handle_intent
+from src.agents.supervisor_agent import (
+    classify_intent, handle_intent, try_handle_pending_decision,
+)
+from src.agents.assignment_and_negotiation_agent import negotiation_pending
 
 # ---------------------------------------------------------------
 # Page setup
@@ -35,7 +37,7 @@ st.caption("Ask questions in natural language, or use the quick actions in the s
 # ---------------------------------------------------------------
 # Result renderer — the UI twin of render_result() in the CLI
 # ---------------------------------------------------------------
-def render_result_st(result: dict):
+def render_result_st(result: dict, key: str = "live"):
     rtype = result.get("type", "text")
 
     if rtype == "error":
@@ -64,6 +66,7 @@ def render_result_st(result: dict):
                     data=f.read(),
                     file_name=os.path.basename(path),
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"download_{key}",          # ← unique per render position
                 )
         elif path:
             st.warning(f"File not found yet: {path}")
@@ -111,6 +114,23 @@ with st.sidebar:
                 {"question": label, "result": result})
             st.rerun()
 
+    # --- Pending negotiation proposal: Accept / Reject ---
+    if negotiation_pending():
+        st.divider()
+        st.markdown("<h4 style='color:#00338D;'>Pending proposal</h4>",
+                    unsafe_allow_html=True)
+        col1, col2 = st.columns(2)
+        if col1.button("✅ Accept", use_container_width=True):
+            result = try_handle_pending_decision("yes")
+            st.session_state.history.append(
+                {"question": "Accept proposal", "result": result})
+            st.rerun()
+        if col2.button("❌ Reject", use_container_width=True):
+            result = try_handle_pending_decision("no")
+            st.session_state.history.append(
+                {"question": "Reject proposal", "result": result})
+            st.rerun()
+
     st.divider()
     if st.button("🧹 Clear conversation", use_container_width=True):
         st.session_state.history = []
@@ -119,11 +139,12 @@ with st.sidebar:
 # ---------------------------------------------------------------
 # Main area: conversation history + chat input
 # ---------------------------------------------------------------
-for turn in st.session_state.history:
+
+for i, turn in enumerate(st.session_state.history):
     with st.chat_message("user"):
         st.write(turn["question"])
     with st.chat_message("assistant"):
-        render_result_st(turn["result"])
+        render_result_st(turn["result"], key=str(i))
 
 question = st.chat_input("Ask about teaching assignments, policies, fairness...")
 
@@ -131,8 +152,14 @@ if question:
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            intent, params = classify_intent(question)
-            result = handle_intent(intent, params)
+        # Pending negotiation decision takes priority over intent routing
+        decision_result = try_handle_pending_decision(question)
+        if decision_result is not None:
+            result = decision_result
+        else:
+            with st.spinner("Thinking..."):
+                intent, params = classify_intent(question)
+                result = handle_intent(intent, params)
         render_result_st(result)
     st.session_state.history.append({"question": question, "result": result})
+    st.rerun()

@@ -8,6 +8,8 @@ import json
 
 def solve_assignments_with_ortools(
     constraints_path: str = "data/processed/constraints.json",
+    adjusted_loads=None,
+    previous_assignments=None,
 ) -> List[Dict[str, str]]:
     """Solve the assignment problem using OR-Tools CP-SAT.
 
@@ -28,6 +30,8 @@ def solve_assignments_with_ortools(
 
     max_evening_sections = constraints.get("max_evening_sections", 2)
     max_preps = constraints.get("max_preparations", 3)
+    adjusted_loads = adjusted_loads or {}
+
 
     faculty = load_faculty()
     sections = load_sections()
@@ -54,7 +58,10 @@ def solve_assignments_with_ortools(
     # CP-SAT requires integers: scale credits by 10 ("deci-credits")
     SCALE = 10
     credits = [int(round(s.credits * SCALE)) for s in sections]
-    required_load = [int(round(f.required_load * SCALE)) for f in faculty]
+    required_load = [
+        int(round((adjusted_loads.get(f.faculty_id, f.required_load)) * SCALE))
+        for f in faculty
+    ]
     course_codes = [s.course_code for s in sections]
     is_evening = [s.evening for s in sections]
     min_load = int(round(constraints.get("min_load_full_time", 0) * SCALE))
@@ -112,7 +119,7 @@ def solve_assignments_with_ortools(
             sum(x[(fi, si)] for si in S if is_evening[si]) <= max_evening_sections
         )
 
-    # 4) Prep limits (distinct courses)
+    # 5) Prep limits (distinct courses)
     # We approximate distinct preps with helper bool vars y[f, c] indicating
     # whether faculty f teaches ANY section of course c.
     course_list = sorted(set(course_codes))
@@ -140,7 +147,7 @@ def solve_assignments_with_ortools(
             sum(y[(fi, ci)] for ci in C) <= max_preps
         )
 
-    # Fairness: minimize the WORST load gap, not the sum
+    # 6) Fairness: minimize the WORST load gap, not the sum
     # (sum of gaps is constant under full coverage, so it cannot drive fairness)
     gaps = []
     for fi in F:
@@ -179,17 +186,32 @@ def solve_assignments_with_ortools(
         model.Add(sum(x[(fi, si)] for si in S) >= 1).OnlyEnforceIf(tn.Not())
         teaches_nothing.append(tn)
 
+    # 7) Stability: reward keeping previous (faculty, section) pairs
+    prev_pairs = set()
+    if previous_assignments:
+        fac_index = {f.faculty_id: fi for fi, f in enumerate(faculty)}
+        sec_index = {s.section_id: si for si, s in enumerate(sections)}
+        for a in previous_assignments:
+            fi = fac_index.get(a["faculty_id"])
+            si = sec_index.get(a["section_id"])
+            if fi is not None and si is not None:
+                prev_pairs.add((fi, si))
+
+    STABILITY_WEIGHT = 200   # CLIENT-CONFIG: cost of moving one section
+    stability_terms = [x[(fi, si)] for (fi, si) in prev_pairs]
+
     COVERAGE_WEIGHT = 10000   # coverage always comes first
     model.Maximize(
         COVERAGE_WEIGHT * sum(x[(fi, si)] for fi in F for si in S)
         - 10 * max_gap                      # primary: help the worst-off
         - 50 * sum(teaches_nothing)         # secondary: nobody should have zero
         - 5 * sum(shortfalls)               # NEW: push everyone toward min load
+        + STABILITY_WEIGHT * sum(stability_terms) 
     )
 
     # Solve
     solver = cp_model.CpSolver()
-    solver.MaxTimeInSeconds = 60.0  # limit time for safety
+    solver.parameters.max_time_in_seconds = 60.0 # limit time for safety
 
     status = solver.Solve(model)
 

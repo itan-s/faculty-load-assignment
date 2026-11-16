@@ -4,8 +4,12 @@ import os
 
 from src.llm.client import ask_llm
 from src.agents.constraints_and_faculty_intel_agent import run_constraints_agent
-from src.agents.assignment_and_negotiation_agent import run_assignment_agent
 from src.agents.decision_support_and_governance_agent import run_governance_agent
+from src.agents.assignment_and_negotiation_agent import (
+    run_assignment_agent,
+    propose_negotiated_plan, accept_pending_plan, reject_pending_plan,
+    negotiation_pending,
+)
 from src.ingestion.excel_loader import load_faculty, load_sections
 from src.validation.metrics import compute_metrics
 
@@ -804,6 +808,68 @@ def handle_unknown(params: dict) -> dict:
                         "rerun constraints.")}
 
 
+def handle_negotiate_plan(params: dict) -> dict:
+    outcome = propose_negotiated_plan(params.get("original_query", ""))
+
+    if outcome["status"] == "no_directives":
+        return {"type": "text", "title": "Negotiation",
+                "content": "I could not extract any supported directives. "
+                           "Try: 'Reduce Dr. Chen's load to 6 credits'."}
+    if outcome["status"] == "no_current_plan":
+        return {"type": "error",
+                "content": "No current plan to negotiate against. Generate a plan first."}
+    if outcome["status"] == "no_changes":
+        return {"type": "text", "title": "Negotiation",
+                "content": "The directive produced no changes — the current plan "
+                           "already satisfies it."}
+
+    if outcome["status"] == "already_satisfied":
+        return {"type": "text", "title": "Negotiation",
+                "content": f"{outcome['faculty']} is already assigned "
+                           f"{outcome['assigned']} credits, which is at or below "
+                           f"the requested {outcome['target']}. No change needed."}
+
+    note = ("(The previous pending proposal was replaced.)\n\n"
+            if outcome.get("replaced_previous") else "")
+    return {"type": "table",
+            "title": "Proposed negotiated plan (not yet applied)",
+            "content": note + outcome["narrative"] +
+                       "\n\n---\n**Accept this plan? (Y/N)**",
+            "rows": outcome["diff"]["load_changes"]}
+
+
+def handle_accept_negotiation(params: dict) -> dict:
+    outcome = accept_pending_plan()
+    if outcome["status"] == "nothing_pending":
+        return {"type": "error", "content": "No pending negotiated plan to accept."}
+    return {"type": "text", "title": "Proposal accepted",
+            "content": "The negotiated plan is now the current plan. "
+                       "Run the admin report to regenerate the Excel."}
+
+
+def handle_reject_negotiation(params: dict) -> dict:
+    outcome = reject_pending_plan()
+    if outcome["status"] == "nothing_pending":
+        return {"type": "error", "content": "No pending negotiated plan to reject."}
+    return {"type": "text", "title": "Proposal rejected",
+            "content": "The pending plan was discarded. The original plan is unchanged."}
+
+
+def try_handle_pending_decision(user_input: str) -> dict | None:
+    """If a negotiation is pending and input is a yes/no answer, resolve it.
+    Returns a result dict, or None to fall through to normal routing."""
+    if not negotiation_pending():
+        return None
+    answer = user_input.strip().lower()
+    YES = {"y", "yes", "accept", "ok", "approve", "apply"}          # CLIENT-CONFIG
+    NO  = {"n", "no", "reject", "discard", "cancel"}
+    if answer in YES:
+        return handle_accept_negotiation({})
+    if answer in NO:
+        return handle_reject_negotiation({})
+    return None
+
+
 # =====================================================================
 # ROUTING
 # =====================================================================
@@ -825,6 +891,9 @@ INTENT_HANDLERS = {
     "suggest_compliance_improvements": handle_suggest_compliance_improvements,
     "list_considered_policies": handle_list_considered_policies,
     "show_faculty": handle_show_faculty,
+    "negotiate_plan": handle_negotiate_plan,
+    "accept_negotiation": handle_accept_negotiation,
+    "reject_negotiation": handle_reject_negotiation,
 }
 
 def handle_intent(intent: str, params: dict) -> dict:
@@ -857,6 +926,17 @@ def handle_intent(intent: str, params: dict) -> dict:
        ("complian" in original_query or "balance" in original_query
         or "assignment" in original_query):
         return handle_suggest_compliance_improvements(params)
+
+    # Accept/reject a pending negotiation
+    if negotiation_pending():
+        if any(w in original_query for w in ["accept", "approve", "apply"]):
+            return handle_accept_negotiation(params)
+        if any(w in original_query for w in ["reject", "discard", "cancel"]):
+            return handle_reject_negotiation(params)
+
+    # Negotiation questions
+    if any(w in original_query for w in ["reduce", "lighter load", "negotiate", "adjust load"]):
+        return handle_negotiate_plan(params)
 
     # --- Exact intent match ---
     handler = INTENT_HANDLERS.get(intent_norm)
@@ -922,6 +1002,12 @@ def supervisor_chat_loop():
             print("Goodbye.")
             break
 
+        # Pending negotiation decision takes priority over intent routing
+        decision_result = try_handle_pending_decision(user_input)
+        if decision_result is not None:
+            render_result(decision_result)
+            continue
+        
         intent, params = classify_intent(user_input)
         print(f"[Supervisor] Detected intent: {intent}")
 
