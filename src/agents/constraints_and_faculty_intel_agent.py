@@ -25,7 +25,7 @@ POLICY DOCUMENT:
 """
 
 def run_constraints_agent():
-    # --- LLM job: extract rules from the policy PDF ---
+    # LLM job: extract rules from the policy PDF
     print("Reading policy PDF...")
     policy_text = extract_pdf_text("data/raw/workload_policy.pdf")
 
@@ -40,7 +40,7 @@ def run_constraints_agent():
     print("Saved data/processed/constraints.json:")
     print(json.dumps(constraints, indent=2))
 
-    # --- Code job: build faculty profiles from Excel (deterministic) ---
+    # Code job: build faculty profiles from Excel (deterministic)
     profiles = [f.model_dump() | {"required_load": f.required_load}
                 for f in load_faculty()]
     with open("data/processed/faculty_profiles.json", "w") as f:

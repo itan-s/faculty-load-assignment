@@ -10,8 +10,9 @@ from src.agents.assignment_and_negotiation_agent import (
     propose_negotiated_plan, accept_pending_plan, reject_pending_plan,
     negotiation_pending,
 )
-from src.ingestion.excel_loader import load_faculty, load_sections
+from src.ingestion.excel_loader import load_faculty, load_sections, load_rooms
 from src.validation.metrics import compute_metrics
+
 
 # =====================================================================
 # RESULT CONVENTION (used by CLI today, UI tomorrow)
@@ -412,6 +413,110 @@ def classify_intent(user_message: str) -> tuple[str, dict]:
 # HANDLERS — each returns a result dict (no printing)
 # =====================================================================
 
+def handle_show_rooms(params: dict) -> dict:
+    """Show all rooms with basic details (from rooms.xlsx)."""
+    try:
+        rooms = load_rooms()
+    except FileNotFoundError:
+        return {"type": "error",
+                "content": "No rooms.xlsx found in data/raw/. "
+                           "Add it and rerun the constraints/plan generation."}
+
+    rows = []
+    for r in rooms:
+        avail = r.availability or {}
+        if avail:
+            parts = []
+            for day, windows in avail.items():
+                for ws, we in windows:
+                    parts.append(f"{day} {ws}-{we}")
+            avail_str = "; ".join(parts)
+        else:
+            avail_str = "Always open"
+
+        rows.append({
+            "RoomID": r.room_id,
+            "Building": r.building,
+            "Capacity": r.capacity,
+            "Available": r.available,
+            "RoomType": getattr(r, "room_type", "Lecture"),
+            "Availability": avail_str,
+        })
+
+    return {"type": "table", "title": "Rooms", "rows": rows}
+
+
+def handle_show_courses_and_rooms(params: dict) -> dict:
+    """Show all offered courses with their assigned faculty and room."""
+    try:
+        plan = load_current_plan()
+    except FileNotFoundError:
+        return {"type": "error",
+                "content": "No current plan found. Generate a plan first."}
+
+    faculty_objs = load_faculty()
+    section_objs = load_sections()
+    faculty_by_id = {f.faculty_id: f.name for f in faculty_objs}
+    sections_by_id = {s.section_id: s for s in section_objs}
+
+    rows = []
+    for a in plan["assignments"]:
+        sid = a["section_id"]
+        fid = a["faculty_id"]
+        sec = sections_by_id.get(sid)
+        if not sec:
+            continue
+        rows.append({
+            "SectionID": sid,
+            "CourseCode": sec.course_code,
+            "Title": sec.title,
+            "Credits": sec.credits,
+            "Days": sec.days,
+            "StartTime": sec.start_time,
+            "EndTime": sec.end_time,
+            "Faculty": faculty_by_id.get(fid, fid),
+            "Room": a.get("room", ""),
+        })
+
+    if not rows:
+        return {"type": "text", "title": "Courses and rooms",
+                "content": "There are no assignments in the current plan."}
+
+    # Optional: sort for readability
+    rows.sort(key=lambda r: (r["CourseCode"], r["SectionID"]))
+    return {"type": "table", "title": "Teaching Load Assignment Report", "rows": rows}
+
+
+def handle_show_courses_offered(params: dict) -> dict:
+    """Show all offered course sections from courses.xlsx."""
+    try:
+        section_objs = load_sections()
+    except FileNotFoundError:
+        return {"type": "error",
+                "content": "No courses.xlsx found in data/raw/. Add it and rerun."}
+
+    if not section_objs:
+        return {"type": "text", "title": "Courses offered",
+                "content": "No course sections found."}
+
+    rows = []
+    for s in section_objs:
+        rows.append({
+            "SectionID": s.section_id,
+            "CourseCode": s.course_code,
+            "Title": s.title,
+            "Credits": s.credits,
+            "Days": s.days,
+            "StartTime": s.start_time,
+            "EndTime": s.end_time,
+            "Evening": s.evening,
+        })
+
+    # Sort for readability
+    rows.sort(key=lambda r: (r["CourseCode"], r["SectionID"]))
+    return {"type": "table", "title": "Courses offered", "rows": rows}
+
+
 def handle_list_considered_policies(params: dict) -> dict:
     try:
         with open(CONSTRAINTS_PATH) as f:
@@ -787,11 +892,27 @@ def handle_generate_plan(params: dict) -> dict:
 
 
 def handle_admin_report(params: dict) -> dict:
-    run_governance_agent()
-    return {"type": "file", "title": "Administrative report generated",
-            "path": "data/processed/final_plan.xlsx",
-            "content": "Report saved to data/processed/governance_report.md and "
-                       "Excel plan to data/processed/final_plan.xlsx."}
+    result = run_governance_agent()
+
+    if not result:
+        # Fallback if run_governance_agent returns None
+        return {"type": "file", "title": "Administrative report generated",
+                "path": "data/processed/final_plan.xlsx",
+                "content": "Report saved to data/processed/governance_report.md and "
+                           "Excel plan to data/processed/final_plan.xlsx."}
+
+    content = (
+        result.get("report_markdown", "").strip()
+        + "\n\n_Excel written to `data/processed/final_plan.xlsx`_"
+    )
+
+    return {
+        "type": "file",
+        "title": "Teaching Assignment Review Report & Excel",
+        "path": "data/processed/final_plan.xlsx",
+        "content": content,
+    }
+
 
 
 def handle_unknown(params: dict) -> dict:
@@ -894,6 +1015,9 @@ INTENT_HANDLERS = {
     "negotiate_plan": handle_negotiate_plan,
     "accept_negotiation": handle_accept_negotiation,
     "reject_negotiation": handle_reject_negotiation,
+    "show_rooms": handle_show_rooms,
+    "show_courses_and_rooms": handle_show_courses_and_rooms,
+    "show_courses_offered": handle_show_courses_offered,
 }
 
 def handle_intent(intent: str, params: dict) -> dict:

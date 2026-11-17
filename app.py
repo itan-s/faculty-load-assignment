@@ -88,30 +88,50 @@ with st.sidebar:
 
     # CLIENT-CONFIG: adjust quick actions per client
     QUICK_ACTIONS = {
-        "📋 Rebuild constraints": "build_constraints",
-        "🗓 Generate new plan": "generate_plan",
-        "♻️ Recalculate plan": "recalculate_plan",
-        "📊 Admin report + Excel": "generate_admin_report",
+        "🔄 Generate Policy-Constrained Teaching Load Assignment": "rebuild_and_generate",
+        "📚 Show Teaching Load Assignment Table": "show_courses_and_rooms",
+        "📊 Print Teaching Load Report + Excel": "generate_admin_report",
+        "👥 Show faculty": "show_faculty",
+        "📘 Show courses offered": "show_courses_offered",
+        "🏫 Show rooms": "show_rooms",                
         "⚖️ Fairness issues": "show_fairness_issues",
         "🚨 Policy violations": "policy_violations",
-        "👥 Show faculty": "show_faculty",
         "💤 Unmet preferences": "unmet_preferences",
-        "💡 Suggest improvements": "suggest_compliance_improvements",
+        "💡 Suggest improvements": "suggest_compliance_improvements",   
     }
 
     for label, intent in QUICK_ACTIONS.items():
-        if st.button(label, use_container_width=True):
+        if st.button(label, width="stretch", key=f"qa_{intent}"): 
             with st.spinner("Working..."):
-                # Direct routing; keyword nets still apply inside handle_intent
                 params = {"original_query": label.lower()}
-                if intent == "policy_violations":
-                    # routed via keyword net: query contains "violations"
-                    params["original_query"] = "which policies are violated"
-                    result = handle_intent("unknown", params)
+
+                if intent == "rebuild_and_generate":
+                    # 1. Rebuild constraints
+                    params = {"original_query": "build constraints"}
+                    r1 = handle_intent("build_constraints", params)
+                    # 2. Generate plan
+                    params = {"original_query": "generate plan"}
+                    r2 = handle_intent("generate_plan", params)
+
+                    # Combine messages (optional)
+                    content = "\n\n".join(
+                        filter(None, [r1.get("content"), r2.get("content")])
+                    ).strip()
+                    result = {
+                        "type": "text",
+                        "title": "Generate Policy-Constrained Teaching Load Assignment safely",
+                        "content": (
+                            content
+                            or "Constraints rebuilt and new policy-constrained teaching load "
+                               "assignment generated."
+                        ),
+                    }
+
                 else:
+                    # Diagnostics, reports, data views
                     result = handle_intent(intent, params)
-            st.session_state.history.append(
-                {"question": label, "result": result})
+
+            st.session_state.history.append({"question": label, "result": result})
             st.rerun()
 
     # --- Pending negotiation proposal: Accept / Reject ---
@@ -120,19 +140,19 @@ with st.sidebar:
         st.markdown("<h4 style='color:#00338D;'>Pending proposal</h4>",
                     unsafe_allow_html=True)
         col1, col2 = st.columns(2)
-        if col1.button("✅ Accept", use_container_width=True):
+        if col1.button("✅ Accept", use_container_width=True, key="accept_proposal"):
             result = try_handle_pending_decision("yes")
             st.session_state.history.append(
                 {"question": "Accept proposal", "result": result})
             st.rerun()
-        if col2.button("❌ Reject", use_container_width=True):
+        if col2.button("❌ Reject", use_container_width=True, key="reject_proposal"):
             result = try_handle_pending_decision("no")
             st.session_state.history.append(
                 {"question": "Reject proposal", "result": result})
             st.rerun()
 
     st.divider()
-    if st.button("🧹 Clear conversation", use_container_width=True):
+    if st.button("🧹 Clear conversation", width="stretch", key="clear_history"):
         st.session_state.history = []
         st.rerun()
 

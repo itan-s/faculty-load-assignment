@@ -186,6 +186,12 @@ def run_governance_agent(plan_path: str = "data/processed/plan_draft_v1.json"):
     # 3) Export final plan to Excel
     export_plan_to_excel(plan["assignments"], faculty_by_id, sections_by_id)
 
+    return {
+        "report_markdown": report,
+        "summary": metrics["summary"],
+        "room_summary": room_summary_text,
+    }
+
 if __name__ == "__main__":
     run_governance_agent()
 
