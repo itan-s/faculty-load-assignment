@@ -1,4 +1,4 @@
-"""Creates fake sample data: faculty.xlsx, courses.xlsx, workload_policy.pdf"""
+"""Creates synthetic sample data: faculty.xlsx, courses.xlsx, workload_policy.pdf"""
 import pandas as pd
 import fitz  # PyMuPDF
 
