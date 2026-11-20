@@ -22,7 +22,7 @@ def solve_assignments_with_ortools(
     - Max_evening_sections per faculty (from constraints).
     - Max_preparations per faculty (distinct course codes).
 
-    Objective (first version): maximize number of assigned sections
+    Objective : maximize number of assigned sections
     while softly penalizing overload of prep and evening limits.
     """
 

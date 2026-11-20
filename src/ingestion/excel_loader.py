@@ -5,7 +5,7 @@ from src.models.room import Room
 from src.solvers.room_solver import parse_availability
 
 # CLIENT-CONFIG: map Excel columns -> preference keys.
-# To support a new preference: add one line here + one checker in supervisor_agent.py
+# For the new preference: add one line here + one checker in supervisor_agent.py
 PREFERENCE_COLUMNS = {
     "PreferredDays":  "preferred_days",
     "AcceptsEvening": "accepts_evening",

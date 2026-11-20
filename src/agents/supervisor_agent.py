@@ -15,7 +15,7 @@ from src.validation.metrics import compute_metrics
 
 
 # =====================================================================
-# RESULT CONVENTION (used by CLI today, UI tomorrow)
+# RESULT CONVENTION (used by CLI today, UI next)
 #   {"type": "text",  "title": str, "content": str}
 #   {"type": "table", "title": str, "rows": [dict, ...], "content": str (optional)}
 #   {"type": "file",  "title": str, "path": str, "content": str}
