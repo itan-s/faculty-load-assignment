@@ -11,6 +11,7 @@ def solve_assignments_with_ortools(
     adjusted_loads=None,
     previous_assignments=None,
     target_min_loads=None,
+    allow_soft_overload: bool = True,
 ) -> List[Dict[str, str]]:
     """Solve the assignment problem using OR-Tools CP-SAT.
 
@@ -114,10 +115,23 @@ def solve_assignments_with_ortools(
 
 
     # 3) Load limits: sum(credits * x) <= required_load
+    total_assigned = {}
     for fi in F:
-        model.Add(
-            sum(credits[si] * x[(fi, si)] for si in S) <= required_load[fi]
-        )
+        total_assigned[fi] = sum(credits[si] * x[(fi, si)] for si in S)
+
+    if allow_soft_overload:
+        # Allow going over required_load but penalize it
+        overload_vars = {}
+        for fi in F:
+            ov = model.NewIntVar(0, max(credits) * len(S), f"overload_f{fi}")
+            model.Add(ov >= total_assigned[fi] - required_load[fi])
+            model.Add(ov >= 0)
+            overload_vars[fi] = ov
+    else:
+        # Strict cap: no overload allowed
+        for fi in F:
+            model.Add(total_assigned[fi] <= required_load[fi])
+        overload_vars = {}
 
     # 4) Evening sections per faculty
     for fi in F:
@@ -159,7 +173,8 @@ def solve_assignments_with_ortools(
     for fi in F:
         assigned = sum(credits[si] * x[(fi, si)] for si in S)
         gap = model.NewIntVar(0, required_load[fi], f"gap_f{fi}")
-        model.Add(gap == required_load[fi] - assigned)
+        model.Add(gap >= required_load[fi] - assigned)
+        model.Add(gap >= 0)
         gaps.append(gap)
 
     max_gap = model.NewIntVar(0, max(required_load), "max_gap")
@@ -224,6 +239,11 @@ def solve_assignments_with_ortools(
 
     TARGET_MIN_WEIGHT = 500   # CLIENT-CONFIG: importance of hitting target mins
 
+    OVERLOAD_WEIGHT = 10  # positive penalty
+    overload_penalty = 0
+    if overload_vars:
+        overload_penalty = OVERLOAD_WEIGHT * sum(overload_vars.values())
+
     COVERAGE_WEIGHT = 10000   # coverage always comes first
     model.Maximize(
         COVERAGE_WEIGHT * sum(x[(fi, si)] for fi in F for si in S)
@@ -231,7 +251,8 @@ def solve_assignments_with_ortools(
         - 50 * sum(teaches_nothing)         # secondary: nobody should have zero
         - 5 * sum(shortfalls)               # NEW: push everyone toward min load
         + STABILITY_WEIGHT * sum(stability_terms)
-        + TARGET_MIN_WEIGHT * sum(target_terms) 
+        + TARGET_MIN_WEIGHT * sum(target_terms)
+        - overload_penalty
     )
 
     # Solve

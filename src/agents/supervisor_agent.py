@@ -1059,7 +1059,7 @@ def handle_intent(intent: str, params: dict) -> dict:
             return handle_reject_negotiation(params)
 
     # Negotiation questions
-    if any(w in original_query for w in ["reduce", "increase", "lighter load",
+    if any(w in original_query for w in ["reduce", "increase", "lighter load", "decrease",
                                          "negotiate", "adjust load", "change load"]):
         return handle_negotiate_plan(params)
 

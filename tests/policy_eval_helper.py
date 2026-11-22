@@ -162,14 +162,41 @@ def run_policy_eval(
         sections_by_id=sections_by_id,
     )
 
-
     per_faculty = m["per_faculty"]
+    print("\n=== Per-faculty loads (required vs assigned) ===")
+    for fid, info in per_faculty.items():
+        print(
+            f"{info['name']:<15} "
+            f"required={info['required_load']:>4} "
+            f"assigned={info['assigned_credits']:>4} "
+            f"gap={info['load_gap']:>4}"
+        )
+
     loads = [p["assigned_credits"] for p in per_faculty.values()] or [0.0]
 
     num_faculty_overload = m["summary"]["faculty_overloaded"]
-    num_faculty_underload = m["summary"]["faculty_underloaded"]
+
+    # Policy underload means assigned load is below min_load_full_time,
+    # not merely below the faculty member's required/target load.
+    min_load = float(constraints.get("min_load_full_time", 0))
+
+    MIN_LOAD_RANKS = {
+        "Professor",
+        "Associate",
+        "Assistant",
+        "Lecturer",
+    }
+
+    num_faculty_underload = sum(
+        1
+        for p in per_faculty.values()
+        if p["rank"] in MIN_LOAD_RANKS
+        and p["assigned_credits"] < min_load
+    )
+
     avg_load = sum(loads) / len(loads)
     max_load = max(loads)
+
 
     # Coverage
     num_sections = len(sections)
