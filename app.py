@@ -137,7 +137,6 @@ def render_chat_guide(expanded: bool = False, title: str = "Suggested Chat Phras
     with st.expander(f"💬 {title}", expanded=expanded):
         st.caption(
             "Type any of the example phrases below in the chat box. "
-            "Names, course codes, and target credit loads may be changed."
         )
         st.caption(
             "Replace placeholders such as <FACULTY_NAME>, <COURSE_CODE>, and "
