@@ -46,6 +46,141 @@ st.caption("Ask questions in natural language, or use the quick actions in the s
 
 
 # ---------------------------------------------------------------
+# Suggested chat phrases
+# ---------------------------------------------------------------
+CHAT_GUIDE = [
+    (
+        "Planning",
+        "Generate a new teaching load assignment plan",
+        "Builds a policy-constrained faculty and room assignment plan.",
+    ),
+    (
+        "Assignments",
+        "Show teaching load assignment",
+        "Shows section, faculty-load, and room-assignment tables with violations.",
+    ),
+    (
+        "Faculty",
+        "Show faculty",
+        "Lists faculty, required loads, qualifications, and preferences.",
+    ),
+    (
+        "Courses",
+        "Show courses offered",
+        "Lists all offered course sections and schedules.",
+    ),
+    (
+        "Rooms",
+        "Show rooms",
+        "Lists classrooms, laboratories, capacities, and availability.",
+    ),
+    (
+        "Policy",
+        "Show policy",
+        "Shows the workload policies and constraints used by the system.",
+    ),
+    (
+        "Violations",
+        "Show policy violations",
+        "Lists the current plan's violations grouped by policy.",
+    ),
+    (
+        "Underload",
+        "Who is below the minimum load?",
+        "Shows faculty below the policy minimum teaching load.",
+    ),
+    (
+        "Overload",
+        "Who is overloaded?",
+        "Shows faculty whose assigned credits exceed their required load.",
+    ),
+    (
+        "Fairness",
+        "Show fairness issues",
+        "Shows workload gaps and department-level fairness statistics.",
+    ),
+    (
+        "Preferences",
+        "Which faculty preferences were not accommodated?",
+        "Shows recorded faculty preferences that were not satisfied.",
+    ),
+    (
+        "Qualifications",
+        "Who can teach <COURSE_CODE>?",
+        "Lists faculty qualified to teach the specified course.",
+    ),
+    (
+        "Explanation",
+        "Why was <FACULTY_NAME> assigned to <COURSE_CODE>?",
+        "Explains an assignment using plan facts and policy constraints.",
+    ),
+    (
+        "Negotiation",
+        "Reduce <FACULTY_A>'s load to <CREDITS> credits and increase <FACULTY_B>'s load to <CREDITS> credits",
+        "Proposes a re-optimized plan when the requested adjustment is feasible.",
+    ),
+    (
+        "Improvement",
+        "Suggest policy compliance improvements",
+        "Suggests valid reassignment options for current violations.",
+    ),
+    (
+        "Report",
+        "Generate the administrative report",
+        "Produces the teaching-load report and downloadable Excel schedule.",
+    ),
+]
+
+
+def render_chat_guide(expanded: bool = False, title: str = "Suggested Chat Phrases"):
+    """Display a guide to supported natural-language requests."""
+    with st.expander(f"💬 {title}", expanded=expanded):
+        st.caption(
+            "Type any of the example phrases below in the chat box. "
+            "Names, course codes, and target credit loads may be changed."
+        )
+        st.caption(
+            "Replace placeholders such as <FACULTY_NAME>, <COURSE_CODE>, and "
+            "<CREDITS> with values from the current dataset."
+            )
+
+
+        guide_rows = [
+            {
+                "Function": category,
+                "Example phrase": phrase,
+                "What it does": description,
+            }
+            for category, phrase, description in CHAT_GUIDE
+        ]
+
+        st.dataframe(
+            pd.DataFrame(guide_rows),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Function": st.column_config.TextColumn(width="small"),
+                "Example phrase": st.column_config.TextColumn(width="large"),
+                "What it does": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+# Display a one-time startup notification.
+if "chat_guide_toast_shown" not in st.session_state:
+    st.toast(
+        "💬 New here? Open the Suggested Chat Phrases guide below.",
+        icon="ℹ️",
+    )
+    st.session_state.chat_guide_toast_shown = True
+
+# Display the full guide near the top of the app.
+render_chat_guide(
+    expanded=True,
+    title="What You Can Ask the System",
+)
+
+
+# ---------------------------------------------------------------
 # Result renderer — the UI twin of render_result() in the CLI
 # ---------------------------------------------------------------
 def render_result_st(result: dict, key: str = "live"):
@@ -378,11 +513,13 @@ with st.sidebar:
                                "assignment generated."
                         ),
                     }
-                elif intent == "show_courses_and_rooms":
-                    result = handle_intent(intent, params)
                 else:
                     # For "📜 Show policy", "👥 Show faculty", and others, let Supervisor handle it
                     result = handle_intent(intent, params)
+                    
+                    # Tell the UI to render the three detailed assignment tables.
+                    if intent == "show_courses_and_rooms":
+                        result["show_assignment_details"] = True
 
                 st.session_state.history.append({"question": label, "result": result})
                 st.rerun()
@@ -416,30 +553,49 @@ with st.sidebar:
 for i, turn in enumerate(st.session_state.history):
     with st.chat_message("user"):
         st.write(turn["question"])
+
     with st.chat_message("assistant"):
-        render_result_st(turn["result"], key=str(i))
+        result = turn["result"]
 
-        # After showing the teaching load table, also show section/faculty/room summaries
-        if turn["question"] == "📚 Show Teaching Load Assignment Table":
+        if result.get("show_assignment_details"):
             show_assignment_and_faculty_summaries()
+        else:
+            render_result_st(result, key=str(i))
 
-        # After "Show faculty", also show enriched faculty view
         if turn["question"] == "👥 Show faculty":
             show_faculty_details()
+
+    # Only display suggestions after the latest response.
+    if i == len(st.session_state.history) - 1:
+        render_chat_guide(
+            expanded=False,
+            title="What Would You Like to Do Next?",
+        )
 
 question = st.chat_input("Ask about teaching assignments, policies, fairness...")
 
 if question:
     with st.chat_message("user"):
         st.write(question)
+
     with st.chat_message("assistant"):
         decision_result = try_handle_pending_decision(question)
+
         if decision_result is not None:
             result = decision_result
         else:
             with st.spinner("Thinking..."):
                 intent, params = classify_intent(question)
-                result = handle_intent(intent, params)
+                
+                if intent == "show_courses_and_rooms":
+                    # Do not generate the original courses table.
+                    result = {"type": "text", "show_assignment_details": True,}
+                else: result = handle_intent(intent, params)
+
         render_result_st(result)
-    st.session_state.history.append({"question": question, "result": result})
+
+    st.session_state.history.append({
+        "question": question,
+        "result": result,
+    })
     st.rerun()

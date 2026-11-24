@@ -1,6 +1,7 @@
 import json
 import difflib
 import os
+import re
 
 from src.llm.client import ask_llm
 from src.agents.constraints_and_faculty_intel_agent import run_constraints_agent
@@ -28,43 +29,58 @@ from src.validation.metrics import compute_metrics
 # =====================================================================
 
 INTENT_SYSTEM_PROMPT = """You are a router for a teaching-load assistant system.
-Given a user's message, classify it into ONE intent and, when possible, also extract parameters.
+Classify the user's message into exactly ONE allowed intent and extract any
+relevant parameters.
 
-Allowed intents and their meanings:
+Allowed intents:
 
-- "generate_plan": create or regenerate a teaching assignment plan for a given term/year.
-- "recalculate_plan": regenerate a plan under the EXISTING constraints.
-- "what_if_change": simulate a hypothetical change to constraints or faculty status.
-- "explain_assignment": explain why a specific assignment was (or was not) made.
-- "compare_plans": compare two named plans (e.g., Plan A vs Plan B).
-- "who_can_teach_course": list faculty qualified to teach a named course.
-- "overloaded_faculty": show faculty exceeding their required load.
-- "courses_misassigned_or_unqualified": find courses where assigned faculty are unqualified.
-- "unmet_preferences": identify faculty preferences that were not satisfied.
-- "show_fairness_issues": describe fairness problems in current plan.
-- "generate_admin_report": generate a high-level administrative report.
-- "suggest_compliance_improvements": suggest changes to improve policy compliance.
-- "list_considered_policies": list which policies/constraints were used in plan generation.
-- "show_faculty": list all faculty and their loads.
-- "build_constraints": rebuild constraints from the official Excel/PDF files.
-- "unknown": does not match any of the above.
+- "build_constraints": rebuild constraints from the official files.
+- "generate_plan": generate a new teaching assignment plan.
+- "recalculate_plan": regenerate the plan using existing constraints.
+- "show_policy": show the policies and constraints used.
+- "policy_violations": show violations in the current plan.
+- "show_faculty": list faculty and teaching loads.
+- "show_courses_offered": list all offered course sections.
+- "show_courses_and_rooms": show section, faculty, and room assignments.
+- "show_rooms": list rooms and availability.
+- "who_can_teach_course": list faculty qualified for a course.
+- "overloaded_faculty": show faculty above their required-load cap.
+- "underloaded_faculty": show faculty below the policy minimum load.
+- "courses_misassigned_or_unqualified": show unqualified assignments.
+- "unmet_preferences": show unmet faculty preferences.
+- "show_fairness_issues": show workload fairness issues.
+- "explain_assignment": explain why an assignment was or was not made.
+- "compare_plans": compare two named plans.
+- "negotiate_plan": increase or reduce a faculty member's assigned load.
+- "generate_admin_report": generate the administrative report and Excel file.
+- "suggest_compliance_improvements": suggest valid compliance improvements.
+- "what_if_change": simulate an explicit hypothetical policy or status change.
+- "unknown": none of the above.
 
-Return a JSON object with at least:
+Return only a JSON object:
+
 {
-  "intent": "<one of the above>",
-  "params": { ... }
+  "intent": "<allowed intent>",
+  "params": {}
 }
 
-For example:
+Parameter examples:
+
+- who_can_teach_course:
+  {"course_name": "Machine Learning"}
+- explain_assignment:
+  {"faculty_name": "Dr. Adams", "course_name": "CS101"}
+- compare_plans:
+  {"plan_a": "draft_v1", "plan_b": "negotiation_pending"}
 - For "generate_plan", params might include {"year": "2027-2028"}.
-- For "compare_plans", params might include {"plan_a": "Plan A", "plan_b": "Plan B"}.
-- For "who_can_teach_course", params might include {"course_name": "Artificial Intelligence"}.
-- For "explain_assignment", params might include {"faculty_name": "Dr. Adams", "course_name": "Intro to Programming"}.
 - For "unmet_preferences", params might include {} for
   "Which faculty preferences could not be accommodated?".
 - "what_if_change" should ONLY be used for explicit hypothetical changes to constraints
   or faculty status.
+
+Do not classify ordinary load negotiation as what_if_change.
 """
+
 
 EXPLAIN_ASSIGNMENT_SYSTEM_PROMPT = """You are an academic scheduling analyst.
 You will be given FACTS about a faculty member, a course, the current plan,
@@ -150,7 +166,6 @@ VIOLATION_POLICY_MAP = {
     "ROOM CONFLICT": "Room Assignment Policy",
     "ROOM UNAVAILABLE": "Room Assignment Policy",   # if added availability windows
 }
-
 
 # CLIENT-CONFIG: fixed descriptions for constraint keys
 CONSTRAINT_DESCRIPTIONS = {
@@ -387,27 +402,6 @@ def find_course_sections_by_name_or_code(section_objs, query: str):
     return [s for s in section_objs
             if difflib.SequenceMatcher(None, q, s.title.lower()).ratio() >= THRESHOLD
             or q in s.title.lower() or s.title.lower() in q]
-
-
-# =====================================================================
-# INTENT CLASSIFICATION
-# =====================================================================
-
-def classify_intent(user_message: str) -> tuple[str, dict]:
-    reply = ask_llm(
-        INTENT_SYSTEM_PROMPT,
-        f'User message: """{user_message}"""\nClassify intent and extract parameters.',
-        json_mode=True,
-    )
-    try:
-        data = json.loads(reply)
-        intent = data.get("intent", "unknown")
-        params = data.get("params", {}) or {}
-        params.setdefault("original_query", user_message)
-        return intent, params
-    except json.JSONDecodeError:
-        return "unknown", {"original_query": user_message}
-
 
 # =====================================================================
 # HANDLERS — each returns a result dict (no printing)
@@ -650,7 +644,7 @@ def handle_show_fairness_issues(params: dict) -> dict:
 
     summary_text = (
         f"Faculty at exact load: {s['faculty_at_exact_load']}\n"
-        f"Underloaded faculty:  {s['faculty_underloaded']}\n"
+        f"Faculty below target load:  {s['faculty_underloaded']}\n"
         f"Overloaded faculty:   {s['faculty_overloaded']}\n"
         f"Load gap std dev:     {s['load_gap_std_dev']}\n"
         f"Evening sections std dev: {s['evening_sections_std_dev']}"
@@ -913,21 +907,25 @@ def handle_admin_report(params: dict) -> dict:
         "content": content,
     }
 
-
-
 def handle_unknown(params: dict) -> dict:
-    return {"type": "text", "title": "I didn't understand that request",
-            "content": ("Try something like:\n"
-                        " - 'Rebuild constraints from the Excel and policy PDF'\n"
-                        " - 'Generate a new assignment plan'\n"
-                        " - 'Recalculate the plan under the existing policies'\n"
-                        " - 'Generate an administrative report'\n"
-                        " - 'Show all faculty members exceeding their recommended load'\n"
-                        " - 'Which faculty preferences could not be accommodated?'\n"
-                        " - 'Which faculty can teach Artificial Intelligence?'\n"
-                        "Note: to change policies, update the official files and "
-                        "rerun constraints.")}
+    query = params.get("original_query", "")
 
+    return {
+        "type": "text",
+        "title": "Please clarify your request",
+        "content": (
+            f"I could not confidently determine what you meant by: "
+            f"“{query}”\n\n"
+            "You can ask me to:\n"
+            "- show the teaching-load assignment or current schedule;\n"
+            "- show faculty, courses, rooms, or policy;\n"
+            "- identify overloads, underloads, violations, or unmet preferences;\n"
+            "- explain an assignment;\n"
+            "- suggest compliance improvements;\n"
+            "- adjust a faculty member's load; or\n"
+            "- generate the administrative report."
+        ),
+    }
 
 def handle_negotiate_plan(params: dict) -> dict:
     outcome = propose_negotiated_plan(params.get("original_query", ""))
@@ -990,6 +988,62 @@ def try_handle_pending_decision(user_input: str) -> dict | None:
         return handle_reject_negotiation({})
     return None
 
+def handle_underloaded_faculty(params: dict) -> dict:
+    """Show faculty below the policy minimum load."""
+    try:
+        plan = load_current_plan()
+        with open(CONSTRAINTS_PATH) as f:
+            constraints = json.load(f)
+    except FileNotFoundError:
+        return {
+            "type": "error",
+            "content": "A current plan and constraints are required.",
+        }
+
+    _, _, faculty_by_id, sections_by_id = get_lookup_tables()
+    metrics = compute_metrics(
+        plan["assignments"],
+        faculty_by_id,
+        sections_by_id,
+    )
+
+    min_load = float(constraints.get("min_load_full_time", 0))
+    applicable_ranks = {
+        "Professor",
+        "Associate",
+        "Assistant",
+        "Lecturer",
+    }
+
+    rows = []
+    for fid, p in metrics["per_faculty"].items():
+        if p["rank"] not in applicable_ranks:
+            continue
+        if p["assigned_credits"] < min_load:
+            rows.append({
+                "name": p["name"],
+                "rank": p["rank"],
+                "assigned": p["assigned_credits"],
+                "policy_minimum": min_load,
+                "shortfall": min_load - p["assigned_credits"],
+            })
+
+    if not rows:
+        return {
+            "type": "text",
+            "title": "Faculty Below Policy Minimum",
+            "content": (
+                f"No applicable faculty are below the policy minimum "
+                f"of {min_load:g} credits."
+            ),
+        }
+
+    return {
+        "type": "table",
+        "title": "Faculty Below Policy Minimum",
+        "rows": rows,
+    }
+
 
 # =====================================================================
 # ROUTING
@@ -1004,6 +1058,7 @@ INTENT_HANDLERS = {
     "compare_plans": handle_compare_plans,
     "who_can_teach_course": handle_who_can_teach_course,
     "overloaded_faculty": handle_overloaded_faculty,
+    "underloaded_faculty": handle_underloaded_faculty,
     "courses_misassigned_or_unqualified": handle_misassigned_or_unqualified,
     "unmet_preferences": handle_unmet_preferences,
     "show_fairness_issues": handle_show_fairness_issues,
@@ -1011,6 +1066,8 @@ INTENT_HANDLERS = {
     "govern_plan": handle_admin_report,
     "suggest_compliance_improvements": handle_suggest_compliance_improvements,
     "list_considered_policies": handle_list_considered_policies,
+    "show_policy": handle_list_considered_policies,
+    "policy_violations": handle_policy_violations,
     "show_faculty": handle_show_faculty,
     "negotiate_plan": handle_negotiate_plan,
     "accept_negotiation": handle_accept_negotiation,
@@ -1021,91 +1078,450 @@ INTENT_HANDLERS = {
 }
 
 def handle_intent(intent: str, params: dict) -> dict:
-    """Route to the right handler. Returns a result dict."""
-    original_query = (params.get("original_query") or "").lower()
-    intent_norm = (intent or "").lower()
+    """Route a classified or direct intent to the appropriate handler."""
+    params = params if isinstance(params, dict) else {}
 
-    # --- Keyword safety nets (checked before exact intent match) ---
+    original_query = str(params.get("original_query") or "").lower().strip()
+    intent_norm = str(intent or "unknown").lower().strip()
 
-    # Overload questions
-    if any(w in original_query for w in ["exceed", "overload", "over their", "above their"]) \
-       and "load" in original_query:
-        return handle_overloaded_faculty(params)
+    assignment_phrases = (
+    "show teaching load assignment",
+    "show teaching-load assignment",
+    "show teaching assignment",
+    "show assignment table",
+    "show current assignments",
+    "show course assignments",
+    "show courses and rooms",
+    )
+    if (
+        intent_norm == "show_courses_and_rooms"
+        or any(phrase in original_query for phrase in assignment_phrases)
+        ):
+        return handle_show_courses_and_rooms(params)
 
-    # Policy questions
-    if "policy" in intent_norm or "policies" in intent_norm or \
-       "policy" in original_query or "policies" in original_query:
-        if any(w in original_query for w in
-               ["violat", "breaking", "broken", "not followed",
-                "non-compliance", "noncompliance"]):
-            return handle_policy_violations(params)
-        return handle_list_considered_policies(params)
-
-    # Preference questions
-    if "preference" in intent_norm or "preference" in original_query:
-        return handle_unmet_preferences(params)
-
-    # Improvement suggestions
-    if ("suggest" in original_query or "improve" in original_query) and \
-       ("complian" in original_query or "balance" in original_query
-        or "assignment" in original_query):
-        return handle_suggest_compliance_improvements(params)
-
-    # Accept/reject a pending negotiation
+    # 1. Pending negotiation decisions have highest priority.
     if negotiation_pending():
-        if any(w in original_query for w in ["accept", "approve", "apply"]):
+        if original_query in {"y", "yes", "accept", "ok", "approve", "apply"}:
             return handle_accept_negotiation(params)
-        if any(w in original_query for w in ["reject", "discard", "cancel"]):
+        if original_query in {"n", "no", "reject", "discard", "cancel"}:
             return handle_reject_negotiation(params)
 
-    # Negotiation questions
-    if any(w in original_query for w in ["reduce", "increase", "lighter load", "decrease",
-                                         "negotiate", "adjust load", "change load"]):
+    # 2. Load negotiation requests.
+    load_change_words = {
+        "reduce",
+        "increase",
+        "decrease",
+        "lighter load",
+        "adjust load",
+        "change load",
+        "negotiate",
+    }
+    if intent_norm == "negotiate_plan" or (
+        "load" in original_query
+        and any(word in original_query for word in load_change_words)
+    ):
         return handle_negotiate_plan(params)
 
+    # 3. Compliance-improvement requests before broad policy matching.
+    if intent_norm == "suggest_compliance_improvements" or (
+        any(word in original_query for word in ("suggest", "improve", "fix"))
+        and any(word in original_query for word in (
+            "compliance",
+            "violation",
+            "assignment",
+            "balance",
+        ))
+    ):
+        return handle_suggest_compliance_improvements(params)
 
-    # --- Exact intent match ---
+    # 4. Plan generation/recalculation before policy matching.
+    if intent_norm in {"build_constraints", "generate_plan", "recalculate_plan"}:
+        return INTENT_HANDLERS[intent_norm](params)
+
+    # 5. Overload and policy-underload questions.
+    if intent_norm == "overloaded_faculty" or (
+        "load" in original_query
+        and any(word in original_query for word in (
+            "overload",
+            "exceed",
+            "above",
+            "over their",
+        ))
+    ):
+        return handle_overloaded_faculty(params)
+
+    if intent_norm == "underloaded_faculty" or (
+        any(word in original_query for word in (
+            "underload",
+            "below minimum",
+            "minimum load",
+        ))
+        and "load" in original_query
+    ):
+        return handle_underloaded_faculty(params)
+
+    # 6. Policy violations.
+    if intent_norm == "policy_violations" or (
+        any(word in original_query for word in (
+            "violation",
+            "violations",
+            "violat",
+            "breaking policy",
+            "broken policy",
+            "non-compliance",
+            "noncompliance",
+        ))
+    ):
+        return handle_policy_violations(params)
+
+    # 7. Unmet preferences.
+    if intent_norm == "unmet_preferences" or "preference" in original_query:
+        return handle_unmet_preferences(params)
+
+    # 8. Show/list policy.
+    if intent_norm in {"show_policy", "list_considered_policies"} or (
+        any(word in original_query for word in ("policy", "policies", "constraints"))
+        and any(word in original_query for word in (
+            "show",
+            "list",
+            "considered",
+            "used",
+            "what",
+        ))
+    ):
+        return handle_list_considered_policies(params)
+
+    # 9. Exact handler dispatch.
     handler = INTENT_HANDLERS.get(intent_norm)
     if handler:
         return handler(params)
+
     return handle_unknown(params)
 
 
 # =====================================================================
-# CLI RENDERING — the only place that prints
-# (A future Streamlit UI will render the same dicts its own way.)
+# INTENT CLASSIFICATION
 # =====================================================================
 
-def render_result(result: dict):
-    rtype = result.get("type", "text")
+def normalize_query(message: str) -> str:
+    """Lowercase a query and remove unnecessary punctuation/spacing."""
+    message = str(message or "").lower()
+    message = re.sub(r"[^\w\s-]", " ", message)
+    return " ".join(message.split())
 
-    if rtype == "error":
-        print(f"\n⚠️  {result.get('content', 'Unknown error')}\n")
-        return
 
-    title = result.get("title")
-    if title:
-        print(f"\n=== {title} ===")
+def contains_any(query: str, terms) -> bool:
+    return any(term in query for term in terms)
 
-    content = result.get("content")
-    if content:
-        print(content)
 
-    if rtype == "table":
-        rows = result.get("rows", [])
-        if rows:
-            headers = list(rows[0].keys())
-            widths = {h: max(len(h), max(len(str(r.get(h, ""))) for r in rows))
-                      for h in headers}
-            print("  " + "  ".join(h.ljust(widths[h]) for h in headers))
-            print("  " + "  ".join("-" * widths[h] for h in headers))
-            for r in rows:
-                print("  " + "  ".join(str(r.get(h, "")).ljust(widths[h])
-                                       for h in headers))
+def infer_intent_deterministically(user_message: str) -> str | None:
+    """
+    Recognize common requests using concepts rather than exact sentences.
 
-    if rtype == "file":
-        print(f"File: {result.get('path')}")
-    print()
+    Returns an intent string or None when the query should go to the LLM.
+    """
+    query = normalize_query(user_message)
+    words = set(query.split())
+
+    view_words = {
+        "show", "display", "view", "list", "see", "give",
+        "present", "provide", "print",
+    }
+
+    # -----------------------------------------------------------
+    # Negotiation: check before general assignment/load queries.
+    # -----------------------------------------------------------
+    change_terms = (
+        "reduce", "increase", "decrease", "adjust",
+        "change", "lighter", "raise", "lower", "negotiate",
+    )
+    load_terms = (
+        "load", "loads", "credit", "credits", "unit", "units",
+    )
+
+    if contains_any(query, change_terms) and contains_any(query, load_terms):
+        return "negotiate_plan"
+
+    # -----------------------------------------------------------
+    # Compliance improvements: check before general policy display.
+    # -----------------------------------------------------------
+    improvement_terms = (
+        "suggest", "improve", "improvement", "recommend",
+        "fix", "correct", "resolve",
+    )
+    compliance_terms = (
+        "compliance", "policy", "violation",
+        "violations", "assignment", "balance",
+    )
+
+    if (
+        contains_any(query, improvement_terms)
+        and contains_any(query, compliance_terms)
+    ):
+        return "suggest_compliance_improvements"
+
+    # -----------------------------------------------------------
+    # Underload / overload
+    # -----------------------------------------------------------
+    if contains_any(query, (
+        "underload",
+        "underloaded",
+        "below minimum",
+        "below the minimum",
+        "minimum load violation",
+        "less than minimum",
+        "fewer than minimum",
+    )):
+        return "underloaded_faculty"
+
+    if contains_any(query, (
+        "overload",
+        "overloaded",
+        "above required load",
+        "exceeding the load",
+        "exceeds the load",
+        "too many credits",
+    )):
+        return "overloaded_faculty"
+
+    # -----------------------------------------------------------
+    # Policy violations: check before general policy display.
+    # -----------------------------------------------------------
+    if contains_any(query, (
+        "policy violation",
+        "policy violations",
+        "show violations",
+        "list violations",
+        "breaking policy",
+        "violating policy",
+        "noncompliance",
+        "non-compliance",
+    )):
+        return "policy_violations"
+
+    # -----------------------------------------------------------
+    # Teaching-load assignment / current schedule
+    # -----------------------------------------------------------
+    assignment_terms = (
+        "assignment", "assignments", "load plan",
+        "teaching plan", "teaching schedule",
+        "course allocation", "faculty allocation",
+        "who teaches", "courses and rooms",
+    )
+    schedule_terms = (
+        "current schedule", "class schedule", "assigned courses",
+    )
+
+    if (
+        (words & view_words)
+        and (
+            contains_any(query, assignment_terms)
+            or contains_any(query, schedule_terms)
+        )
+    ):
+        return "show_courses_and_rooms"
+
+    # Also recognize short noun-style requests.
+    if query in {
+        "teaching load assignment",
+        "teaching assignments",
+        "current assignments",
+        "assignment table",
+        "load plan",
+        "current schedule",
+    }:
+        return "show_courses_and_rooms"
+
+    # -----------------------------------------------------------
+    # Basic data views
+    # -----------------------------------------------------------
+    if (words & view_words) and contains_any(query, (
+        "room", "rooms", "classroom", "classrooms", "laboratory", "laboratories",
+    )):
+        return "show_rooms"
+
+    if (words & view_words) and contains_any(query, (
+        "courses offered", "course offerings",
+        "offered courses", "offered sections",
+    )):
+        return "show_courses_offered"
+
+    if (words & view_words) and contains_any(query, (
+        "faculty", "faculty members", "instructors", "professors",
+    )):
+        return "show_faculty"
+
+    # -----------------------------------------------------------
+    # Preferences and fairness
+    # -----------------------------------------------------------
+    if contains_any(query, (
+        "unmet preference", "unmet preferences",
+        "preferences not met", "preferences not accommodated",
+        "preference issues",
+    )):
+        return "unmet_preferences"
+
+    if contains_any(query, (
+        "fairness", "fair", "balanced loads",
+        "load balance", "unequal loads", "inequitable",
+    )):
+        return "show_fairness_issues"
+
+    # -----------------------------------------------------------
+    # Reports
+    # -----------------------------------------------------------
+    if (
+        contains_any(query, ("report", "excel", "export"))
+        and contains_any(query, (
+            "generate", "create", "produce", "print",
+            "download", "administrative", "teaching load",
+        ))
+    ):
+        return "generate_admin_report"
+
+    # -----------------------------------------------------------
+    # Plan generation
+    # -----------------------------------------------------------
+    if (
+        contains_any(query, ("generate", "create", "build", "make"))
+        and contains_any(query, (
+            "plan", "assignment plan", "teaching plan", "schedule",
+        ))
+    ):
+        return "generate_plan"
+
+    if (
+        contains_any(query, ("recalculate", "regenerate", "rerun", "recompute"))
+        and contains_any(query, ("plan", "assignment", "schedule"))
+    ):
+        return "recalculate_plan"
+
+    # -----------------------------------------------------------
+    # General policy display
+    # -----------------------------------------------------------
+    if (
+        (words & view_words)
+        and contains_any(query, (
+            "policy", "policies", "constraint", "constraints", "rules",
+        ))
+    ):
+        return "show_policy"
+
+    if query in {
+        "policy", "policies", "constraints",
+        "show policy", "show constraints",
+    }:
+        return "show_policy"
+
+    # The query is ambiguous; allow the LLM to classify it.
+    return None
+
+INTENT_ALIASES = {
+    "show_teaching_load_assignment": "show_courses_and_rooms",
+    "show_teaching_assignments": "show_courses_and_rooms",
+    "show_assignment": "show_courses_and_rooms",
+    "show_assignments": "show_courses_and_rooms",
+    "show_schedule": "show_courses_and_rooms",
+    "teaching_load_assignment": "show_courses_and_rooms",
+
+    "show_policy_constraints": "show_policy",
+    "list_policies": "show_policy",
+    "list_constraints": "show_policy",
+
+    "show_violations": "policy_violations",
+    "show_policy_violations": "policy_violations",
+
+    "show_underloaded_faculty": "underloaded_faculty",
+    "underload": "underloaded_faculty",
+
+    "show_overloaded_faculty": "overloaded_faculty",
+    "overload": "overloaded_faculty",
+
+    "compliance_improvements": "suggest_compliance_improvements",
+    "suggest_improvements": "suggest_compliance_improvements",
+
+    "show_courses": "show_courses_offered",
+    "list_courses": "show_courses_offered",
+    "list_rooms": "show_rooms",
+    "list_faculty": "show_faculty",
+
+    "admin_report": "generate_admin_report",
+    "generate_report": "generate_admin_report",
+}
+
+CLASSIFIABLE_INTENTS = {
+    "build_constraints",
+    "generate_plan",
+    "recalculate_plan",
+    "what_if_change",
+    "explain_assignment",
+    "compare_plans",
+    "who_can_teach_course",
+    "overloaded_faculty",
+    "underloaded_faculty",
+    "courses_misassigned_or_unqualified",
+    "unmet_preferences",
+    "show_fairness_issues",
+    "generate_admin_report",
+    "suggest_compliance_improvements",
+    "show_policy",
+    "policy_violations",
+    "show_faculty",
+    "show_rooms",
+    "show_courses_and_rooms",
+    "show_courses_offered",
+    "negotiate_plan",
+    "unknown",
+}
+
+
+def classify_intent(user_message: str) -> tuple[str, dict]:
+    """
+    First recognize common requests deterministically.
+    Use the LLM only for requests that remain ambiguous.
+    """
+    params = {"original_query": user_message}
+
+    deterministic_intent = infer_intent_deterministically(user_message)
+    if deterministic_intent:
+        return deterministic_intent, params
+
+    try:
+        reply = ask_llm(
+            INTENT_SYSTEM_PROMPT,
+            f"""User message:
+\"\"\"{user_message}\"\"\"
+
+Classify the intent and extract relevant parameters.
+Return only the required JSON object.""",
+            json_mode=True,
+        )
+
+        data = json.loads(reply)
+
+        if not isinstance(data, dict):
+            return "unknown", params
+
+        intent = str(data.get("intent", "unknown")).strip().lower()
+        intent = INTENT_ALIASES.get(intent, intent)
+
+        if intent not in CLASSIFIABLE_INTENTS:
+            intent = "unknown"
+
+        extracted_params = data.get("params", {})
+        if not isinstance(extracted_params, dict):
+            extracted_params = {}
+
+        extracted_params["original_query"] = user_message
+        return intent, extracted_params
+
+    except (
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+    ):
+        return "unknown", params
 
 
 # =====================================================================

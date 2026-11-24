@@ -11,7 +11,7 @@ def solve_assignments_with_ortools(
     adjusted_loads=None,
     previous_assignments=None,
     target_min_loads=None,
-    allow_soft_overload: bool = True,
+    allow_soft_overload: bool = False,
 ) -> List[Dict[str, str]]:
     """Solve the assignment problem using OR-Tools CP-SAT.
 
